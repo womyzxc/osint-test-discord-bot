@@ -1,15 +1,16 @@
 import discord
 from discord.ext import commands
+import discord.app_commands
 import aiohttp
 import asyncio
 import os
 import re
 import json
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, Dict, List
 import logging
 
-# Railway logging setup
+# Railway logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -21,92 +22,88 @@ class FullOSINTBot(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.session = None
-        
-        # Regex patterns
-        self.phone_pattern = re.compile(r'^\+?1?[-.\s]?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})$')
-        self.email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
-        self.ip_pattern = re.compile(r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')
+        self.tree = bot.tree
 
     async def cog_load(self):
         self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=12),
+            timeout=aiohttp.ClientTimeout(total=15),
             headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         )
-        logger.info("🔥 Full OSINT session ready!")
+        logger.info("🔥 OSINT Session Ready")
 
     async def cog_unload(self):
         if self.session:
             await self.session.close()
 
-    # 🎯 MAIN ALL-IN-ONE OSINT COMMAND
-    @commands.slash_command(name="osint", description="🔍 FULL OSINT - Auto detects Phone/Email/IP/Domain/Person")
-    async def osint(self, ctx, target: str, modules: Optional[str] = "all"):
-        """Complete OSINT reconnaissance - Auto detects input type!"""
-        await ctx.defer()
-        
-        # Detect target type
-        target_type = self.detect_target_type(target)
-        clean_target = self.clean_target(target)
-        
-        modules_list = [m.strip().lower() for m in modules.split(',')] if modules else ['all']
-        if 'all' in modules_list:
-            modules_list = ['basic', 'phone', 'email', 'ip', 'domain', 'people']
-        
-        results = {
-            "target": clean_target,
-            "detected_type": target_type,
-            "scan_time": datetime.utcnow().isoformat()
-        }
-        
-        # Dynamic task creation based on target type
-        tasks = []
-        for module in modules_list:
-            task = self.get_osint_module(module, clean_target, target_type)
-            if task:
-                tasks.append(task)
-        
-        # Execute all tasks concurrently
-        if tasks:
-            task_results = await asyncio.gather(*tasks, return_exceptions=True)
-            for i, result in enumerate(task_results):
-                if isinstance(result, dict):
-                    results.update(result)
-        
-        embed = self.create_osint_embed(results)
-        await ctx.followup.send(embed=embed)
-
     def detect_target_type(self, target: str) -> str:
         target = target.strip().lower()
-        if self.phone_pattern.match(re.sub(r'[^\d+]', '', target)):
+        
+        # Phone
+        phone_match = re.match(r'^\+?1?[-.\s]?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}$', target.replace(' ', ''))
+        if phone_match:
             return "phone"
-        if self.email_pattern.match(target):
+        
+        # Email
+        if re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', target):
             return "email"
-        if self.ip_pattern.match(target):
+            
+        # IP
+        if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', target):
             return "ip"
-        if re.match(r'^([a-z0-9-]+\.)+[a-z]{2,}$', target):
+            
+        # Domain
+        if re.match(r'^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-zA-Z]{2,}$', target):
             return "domain"
+            
         return "person"
 
-    def clean_target(self, target: str) -> str:
-        return re.sub(r'^https?://|www\.', '', target).split('/')[0].strip()
-
-    def get_osint_module(self, module: str, target: str, target_type: str):
-        methods = {
-            'phone': self.phone_osint,
-            'email': self.email_osint,
-            'ip': self.ip_osint,
-            'domain': self.domain_osint,
-            'people': self.people_osint,
-            'basic': lambda t: self.basic_osint(t)
-        }
-        return methods.get(module, None)(target) if module in methods else None
-
-    # 📱 PHONE OSINT (Numverify + Patterns - FREE)
-    async def phone_osint(self, phone: str) -> Dict:
-        """FREE Phone number OSINT"""
-        results = {'phone': phone, 'formatted': self.format_phone(phone)}
+    @discord.app_commands.command(name="osint", description="🔍 FULL OSINT - Auto detects Phone/Email/IP/Domain/Person")
+    async def osint(self, interaction: discord.Interaction, target: str, modules: Optional[str] = "all"):
+        await interaction.response.defer()
         
-        # Numverify free lookup
+        target_type = self.detect_target_type(target)
+        modules_list = [m.strip() for m in modules.lower().split(',')] if modules != "all" else ['all']
+        
+        embed = discord.Embed(
+            title=f"🕵️ OSINT Recon: {target}",
+            description=f"**Type:** `{target_type.upper()}` | **Modules:** {modules}",
+            color=0x00ff88
+        )
+        
+        # Run OSINT modules
+        results = {}
+        
+        if target_type == "phone" or 'phone' in modules_list or 'all' in modules_list:
+            results["phone"] = await self.phone_osint(target)
+            
+        if target_type == "email" or 'email' in modules_list or 'all' in modules_list:
+            results["email"] = await self.email_osint(target)
+            
+        if target_type == "ip" or 'ip' in modules_list or 'all' in modules_list:
+            results["ip"] = await self.ip_osint(target)
+            
+        if target_type == "domain" or 'domain' in modules_list or 'all' in modules_list:
+            results["domain"] = await self.domain_osint(target)
+            
+        if target_type == "person" or 'people' in modules_list or 'all' in modules_list:
+            results["person"] = await self.people_osint(target)
+        
+        # Add results to embed
+        for key, data in results.items():
+            embed.add_field(
+                name=f"{self.get_emoji(key)} {key.upper()} OSINT",
+                value=f"```{json.dumps(data, indent=2, default=str)[:1000]}```",
+                inline=False
+            )
+        
+        embed.set_footer(text="🔥 100% FREE APIs | Railway Hosted")
+        embed.timestamp = datetime.utcnow()
+        await interaction.followup.send(embed=embed)
+
+    # 📱 PHONE OSINT
+    async def phone_osint(self, phone: str) -> Dict:
+        results = {"raw": phone, "formatted": self.format_phone(phone)}
+        
         try:
             clean_phone = re.sub(r'[^\d+]', '', phone)
             url = f"http://apilayer.net/api/validate?access_key=&number={clean_phone}&format=1"
@@ -114,243 +111,158 @@ class FullOSINTBot(commands.Cog):
                 if resp.status == 200:
                     data = await resp.json()
                     results.update({
-                        'carrier': data.get('carrier', 'Unknown'),
-                        'type': data.get('line_type', 'Unknown'),
-                        'location': data.get('location', 'Unknown'),
-                        'valid': data.get('valid', False),
-                        'country': data.get('country_name', 'Unknown')
+                        "carrier": data.get("carrier"),
+                        "type": data.get("line_type"), 
+                        "location": data.get("location"),
+                        "valid": data.get("valid", False),
+                        "country": data.get("country_name")
                     })
-        except:
-            results['note'] = 'Enhanced lookup unavailable - patterns active'
+        except Exception as e:
+            results["note"] = "Numverify unavailable"
         
-        return {'phone_osint': results}
+        return results
 
     def format_phone(self, phone: str) -> str:
-        """Standardize phone format"""
-        digits = re.sub(r'[^\d+]', '', phone)
-        if digits.startswith('+'):
-            return digits
+        digits = re.sub(r'[^\d]', '', phone)
         if len(digits) == 10:
-            return f"+1{digits}"
-        return digits
+            return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+        elif len(digits) == 11 and digits.startswith('1'):
+            return f"+1 ({digits[1:4]}) {digits[4:7]}-{digits[7:]}"
+        return phone
 
-    # ✉️ EMAIL OSINT (Hunter patterns + Domain recon - FREE)
+    # ✉️ EMAIL OSINT
     async def email_osint(self, email: str) -> Dict:
-        """FREE Email OSINT with domain recon"""
         domain = email.split('@')[1]
-        results = {'email': email, 'domain': domain}
+        results = {"email": email, "domain": domain}
         
-        # Domain DNS
         dns = await self.dns_recon(domain)
-        results['dns'] = dns
+        results["dns"] = {k: dns[k][0] if dns[k] else "None" for k in dns}
         
-        # Email patterns for domain
-        patterns = [f"{prefix}@{domain}" for prefix in 
-                   ['info', 'support', 'admin', 'contact', 'hello', 'noreply']]
-        results['patterns'] = patterns
+        names = ['info', 'support', 'admin', 'contact']
+        results["patterns"] = [f"{name}@{domain}" for name in names]
         
-        return {'email_osint': results}
+        return results
 
-    # 🌐 IP OSINT (ipapi.co - FREE 1000/day)
+    # 🌐 IP OSINT
     async def ip_osint(self, ip: str) -> Dict:
-        """FREE IP Geolocation & Owner"""
         try:
             async with self.session.get(f"https://ipapi.co/{ip}/json/") as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return {
-                        'ip_osint': {
-                            'ip': ip,
-                            'city': data.get('city'),
-                            'region': data.get('region'),
-                            'country': data.get('country_name'),
-                            'org': data.get('org'),
-                            'isp': data.get('org'),
-                            'lat': data.get('latitude'),
-                            'lon': data.get('longitude'),
-                            'timezone': data.get('timezone')
-                        }
+                        "city": data.get("city"),
+                        "region": data.get("region"), 
+                        "country": data.get("country_name"),
+                        "org": data.get("org"),
+                        "lat": data.get("latitude"),
+                        "lon": data.get("longitude")
                     }
         except:
             pass
-        return {'ip_osint': {'error': 'IP lookup failed'}}
+        return {"error": "IP lookup failed"}
 
-    # 🏠 DOMAIN OSINT (Full stack - FREE)
+    # 🏠 DOMAIN OSINT
     async def domain_osint(self, domain: str) -> Dict:
-        """Complete FREE domain reconnaissance"""
-        tasks = [
-            self.dns_recon(domain),
-            self.whois_free(domain),
-            self.subdomain_enum_free(domain),
-            self.tech_stack_free(f"https://{domain}")
-        ]
-        dns, whois, subs, tech = await asyncio.gather(*tasks)
+        try:
+            dns, whois, subs = await asyncio.gather(
+                self.dns_recon(domain),
+                self.whois_free(domain),
+                self.subdomain_enum_free(domain)
+            )
+            return {
+                "dns": {k: dns[k][0] if dns[k] else "None" for k in dns},
+                "whois": whois,
+                "subdomains": subs[:5]
+            }
+        except:
+            return {"error": "Domain lookup failed"}
+
+    # 👥 PEOPLE OSINT
+    async def people_osint(self, name: str) -> Dict:
+        username = re.sub(r'[^\w]', '', name.lower())
         return {
-            'domain_osint': {
-                'dns': dns,
-                'whois': whois,
-                'subdomains': subs,
-                'tech': tech
+            "name": name,
+            "username": username,
+            "profiles": {
+                "twitter": f"https://twitter.com/{username}",
+                "github": f"https://github.com/{username}",
+                "linkedin": f"https://linkedin.com/in/{username}"
             }
         }
 
-    # 👥 PEOPLE OSINT (Social + Patterns - FREE)
-    async def people_osint(self, name: str) -> Dict:
-        """FREE People reconnaissance"""
-        username = re.sub(r'\s+', '', name.lower())
-        profiles = {
-            'twitter': f"https://twitter.com/{username}",
-            'github': f"https://github.com/{username}",
-            'linkedin': f"https://linkedin.com/in/{username}",
-            'instagram': f"https://instagram.com/{username}",
-            'facebook': f"https://facebook.com/{username}"
-        }
-        return {'people_osint': {'name': name, 'profiles': profiles}}
-
-    # 🛠️ SUPPORT FUNCTIONS (FREE APIs)
+    # 🔧 SUPPORT APIs
     async def dns_recon(self, domain: str) -> Dict:
-        """Google DNS API - UNLIMITED FREE"""
-        records = {}
-        types = ['A', 'MX', 'NS', 'TXT']
+        dns = {}
+        types = ['A', 'MX', 'NS']
         for t in types:
             try:
                 async with self.session.get(f"https://dns.google/resolve?name={domain}&type={t}") as r:
                     data = await r.json()
-                    records[t] = [ans['data'] for ans in data.get('Answer', [])][:2]
+                    dns[t] = [ans.get('data') for ans in data.get('Answer', [])]
             except:
-                records[t] = []
-        return records
+                dns[t] = []
+        return dns
 
     async def whois_free(self, domain: str) -> Dict:
-        """whoisjson.com - 1000/day FREE"""
         try:
             async with self.session.get(f"https://whoisjson.com/v1/{domain}") as r:
-                data = await r.json()
-                return {
-                    'registrar': data.get('registrar'),
-                    'created': data.get('created'),
-                    'expires': data.get('expires'),
-                    'status': data.get('status', [])
-                }
+                return await r.json() if r.status == 200 else {}
         except:
             return {}
 
-    async def subdomain_enum_free(self, domain: str) -> List:
-        """crt.sh - UNLIMITED FREE"""
+    async def subdomain_enum_free(self, domain: str) -> List[str]:
         try:
             async with self.session.get(f"https://crt.sh/?q=%25.{domain}&output=json") as r:
                 data = await r.json()
                 subs = set()
-                for entry in data[:25]:
-                    name = entry.get('name_value', '')
-                    for line in name.split('\n'):
-                        clean = line.strip(' *.')
-                        if domain in clean:
-                            subs.add(clean)
-                return sorted(list(subs))
+                for e in data[:20]:
+                    for line in str(e.get('name_value', '')).split('\n'):
+                        clean = line.strip().strip('*.')
+                        if domain in clean: subs.add(clean)
+                return list(subs)
         except:
             return []
 
-    async def tech_stack_free(self, url: str) -> Dict:
-        """HTTP Headers - UNLIMITED FREE"""
-        try:
-            async with self.session.get(url, allow_redirects=True) as r:
-                headers = dict(r.headers)
-                server = headers.get('server', 'Unknown')
-                techs = []
-                if 'nginx' in server.lower(): techs.append('Nginx')
-                if 'apache' in server.lower(): techs.append('Apache')
-                return {'server': server, 'powered_by': headers.get('x-powered-by'), 'techs': techs}
-        except:
-            return {}
+    def get_emoji(self, key: str) -> str:
+        emojis = {
+            "phone": "📱", "email": "✉️", "ip": "🌐", 
+            "domain": "🏠", "person": "👥"
+        }
+        return emojis.get(key, "🔍")
 
-    async def basic_osint(self, target: str) -> Dict:
-        """Basic info for any target"""
-        return {'basic': {'length': len(target), 'chars': set(target)}}
-
-    def create_osint_embed(self, results: Dict) -> discord.Embed:
-        embed = discord.Embed(
-            title=f"🕵️ OSINT Complete - {results['detected_type'].upper()}",
-            color=0x00ff88
-        )
-        
-        # Type specific formatting
-        if 'phone_osint' in results:
-            phone_data = results['phone_osint']
-            embed.add_field(
-                name="📱 Phone Details",
-                value=f"```{json.dumps(phone_data, indent=2)[:1000]}```",
-                inline=False
-            )
-        if 'email_osint' in results:
-            email_data = results['email_osint']
-            embed.add_field(name="✉️ Email Recon", value=f"Domain: {email_data['domain']}", inline=True)
-        if 'ip_osint' in results:
-            ip_data = results['ip_osint']
-            embed.add_field(
-                name="🌐 IP Geolocation",
-                value=f"```{ip_data.get('city', 'N/A')}, {ip_data.get('country', 'N/A')} | {ip_data.get('org', 'N/A')}```",
-                inline=False
-            )
-        if 'domain_osint' in results:
-            domain_data = results['domain_osint']
-            embed.add_field(name="🏠 Domain", value=f"Subdomains: {len(domain_data['subdomains'])}", inline=True)
-        
-        embed.set_footer(text="🔥 100% FREE APIs | Railway Hosted")
-        return embed
-
-# 🛠️ SPECIALIZED COMMANDS
-@bot.slash_command(name="phone", description="📱 Phone number OSINT")
-async def phone_cmd(ctx, number: str):
+# 🛠️ QUICK COMMANDS (Traditional prefix)
+@bot.command(name='phone')
+async def phone_cmd(ctx, *, phone: str):
     await ctx.defer()
     cog = bot.get_cog('FullOSINTBot')
-    result = await cog.phone_osint(number)
-    embed = discord.Embed(title="📱 Phone OSINT", color=0xff6600, description=f"```{str(result)}```")
+    result = await cog.phone_osint(phone)
+    embed = discord.Embed(title="📱 Phone OSINT", color=0xff6600)
+    embed.description = f"```{json.dumps(result, indent=2, default=str)[:1900]}```"
     await ctx.followup.send(embed=embed)
 
-@bot.slash_command(name="email", description="✉️ Email OSINT")
-async def email_cmd(ctx, email: str):
-    await ctx.defer()
-    cog = bot.get_cog('FullOSINTBot')
-    result = await cog.email_osint(email)
-    embed = discord.Embed(title="✉️ Email OSINT", color=0xff6600, description=f"```{str(result)}```")
-    await ctx.followup.send(embed=embed)
-
-@bot.slash_command(name="ip", description="🌐 IP OSINT & Geolocation")
+@bot.command(name='ip')
 async def ip_cmd(ctx, ip: str):
     await ctx.defer()
     cog = bot.get_cog('FullOSINTBot')
     result = await cog.ip_osint(ip)
-    embed = discord.Embed(title="🌐 IP OSINT", color=0xff6600, description=f"```{str(result)}```")
+    embed = discord.Embed(title="🌐 IP OSINT", color=0x0099ff)
+    embed.description = f"```{json.dumps(result, indent=2, default=str)[:1900]}```"
     await ctx.followup.send(embed=embed)
 
-@bot.slash_command(name="detect", description="🔍 Auto-detect target type")
-async def detect_cmd(ctx, target: str):
-    cog = bot.get_cog('FullOSINTBot')
-    target_type = cog.detect_target_type(target)
-    embed = discord.Embed(title="🔍 Target Analysis", 
-                         description=f"**{target}** → **{target_type.upper()}**", 
-                         color=0x0099ff)
-    await ctx.respond(embed=embed)
-
-# 🚀 RAILWAY READY STARTUP
 @bot.event
 async def on_ready():
-    logger.info(f"🕵️ {bot.user} is online - Full OSINT ready!")
+    logger.info(f"✅ {bot.user} is online!")
+    await bot.add_cog(FullOSINTBot(bot))
+    
     try:
         synced = await bot.tree.sync()
-        logger.info(f"✅ Synced {len(synced)} OSINT commands")
+        logger.info(f"✅ Synced {len(synced)} slash commands")
     except Exception as e:
-        logger.error(f"❌ Command sync failed: {e}")
-
-async def main():
-    async with bot:
-        await bot.add_cog(FullOSINTBot(bot))
-        token = os.getenv('DISCORD_TOKEN')
-        if not token:
-            logger.error("❌ DISCORD_TOKEN not found!")
-            return
-        await bot.start(token)
+        logger.error(f"❌ Slash sync failed: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    token = os.getenv('DISCORD_TOKEN')
+    if token:
+        bot.run(token)
+    else:
+        logger.error("❌ DISCORD_TOKEN not set!")
